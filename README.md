@@ -21,5 +21,3 @@ Florian Pierre Martin(1,2), Thomas Goronflot(3), Jean Denis Moyer(4), Olivier Hu
 
 **KEYWORDS**
 Traumatic brain injury, GOS-E, Predictive modeling, Intensive care, Machine learning
-
-**DOI:**
