@@ -11,7 +11,7 @@ Florian Pierre Martin(1,2), Thomas Goronflot(3), Jean Denis Moyer(4), Olivier Hu
 5 Anesthesia and Intensive Care Unit, CHU Brest, Brest, France\
 6 Methods in Patient‑Centered Outcomes and Healthy Research (SPHERE), INSERM, UMR 1246, Nantes Université, Université de Tours, Nantes, France
 
-***Corresponding author***. Florian Pierre Martin. Institut de Recherche en Santé 2 Nantes Biotech, Nantes University, 44000 Nantes, France. e-mail: florianpierremartin@gmail.com\
+***Corresponding author***. Florian Pierre Martin. Institut de Recherche en Santé 2 Nantes Biotech, Nantes University, 44000 Nantes, France. e-mail: florianpierremartin@gmail.com
 
 ## ABSTRACT
 ***Background***. The prognostication of long-term functional outcomes remains challenging in patients with traumatic brain injury (TBI). Our aim was to demonstrate that intensive care unit (ICU) variables are not efficient to predict 6-month functional outcome in survivors with moderate to severe TBI (msTBI) but are mostly associated with mortality, which leads to a mortality bias for models predicting a composite outcome of mortality and severe disability.\
