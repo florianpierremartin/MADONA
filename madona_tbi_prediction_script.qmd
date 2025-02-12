@@ -1,0 +1,377 @@
+---
+title: "MADONA - TBI outcome prediction"
+author: "Florian Pierre MARTIN"
+date: "`r Sys.Date()`"
+toc: true
+number-sections: true
+format: 
+  html:
+    code-fold: true
+    df-print: paged
+editor: visual
+---
+
+```{r}
+library(tidymodels)
+library(tidyverse)
+library(gmodels)
+library(naniar)
+library(lubridate)
+library(tableone)
+library(gridExtra)
+library(hms)
+library(readxl)
+library(corrplot)
+library(ggplot2)
+library(Boruta)
+library(mice)
+library(missForest)
+library(Rcpp)
+library(ggpubr)
+library(glmnet)
+library(ranger)
+library(xgboost)
+library(keras)
+library(discrim)
+library(kknn)
+library(kernlab)
+library(themis)
+library(viridis)
+library(FactoMineR)
+library(factoextra)
+library(tableone)
+library(FFTrees)
+library(ggpubr)
+library(probably)
+library(betacal)
+library(pROC)
+library(VIM)
+```
+
+# Data preprocessing
+
+## Missing data
+
+### Pattern
+
+```{r}
+mice_plot <- aggr(madona_mother %>% dplyr::select(pic_moy, pic_var, evo_scan, evo_scan_bin, starts_with("evl_")), col=c('navyblue','yellow'),
+                    numbers=TRUE, sortVars=TRUE,
+                    labels=names(madona_mother %>% dplyr::select(pic_moy, pic_var, evo_scan, evo_scan_bin, starts_with("evl_"))), cex.axis=.7,
+                    gap=3, ylab=c("Missing data","Pattern"))
+
+gg_miss_upset(madona_mother)
+
+ggplot(madona_mother,
+       aes(x = pic_moy,
+           y = evo_scan)) +
+ geom_miss_point() + facet_wrap(~evo_scan)
+
+gg_miss_fct(x = madona_mother %>% dplyr::select(pic_moy, pic_var, evo_scan, starts_with("evl_"), glas), fct = glas)
+```
+
+### Imputation
+
+#### missForest
+
+```{r}
+########### using missForest
+set.seed(261)
+madona_moth_missfo <- missForest(madona_mother %>% as.data.frame(), variablewise = FALSE, verbose = TRUE, mtry = 20, maxiter = 20, ntree = 200)
+madona_moth_missfo$OOBerror
+madona_moth_imp <- madona_moth_missfo$ximp
+```
+
+#### MICE (pmm)
+
+```{r}
+madona_mice <- mice(madona_mother, m = 5, method = if_else(colnames(madona_mother) == "pic_moy" | colnames(madona_mother) == "pic_var", "pmm", if_else(colnames(madona_mother) == "evo_scan_bin" | colnames(madona_mother) == "evl_s" | colnames(madona_mother) == "evl_azi" | colnames(madona_mother) == "evl_ao" | colnames(madona_mother) == "evl_ame" | colnames(madona_mother) == "evl_am1" | colnames(madona_mother) == "evl_am", "logreg", if_else(colnames(madona_mother) == "evo_scan", "polyreg", ""))), seed = 23)
+
+madona_imp_mice <- madona_mice %>%
+  complete(action = 1) %>% as_tibble()
+```
+
+# Data exploration
+
+## FAMD
+
+```{r}
+## show mortality bias
+res.famd <- FAMD(madona_moth_imp, graph = FALSE, sup.var = c(38, 39, 51, 55))
+fviz_mfa_ind(res.famd, 
+             habillage = "deces_m6",
+             addEllipses = T, ellipse.type = "euclid",
+             geom = "point",
+             mean.point = FALSE,
+             palette = c("#FAB248", "#91501B"),
+             repel = F
+) 
+ind <- get_famd_ind(res.famd)
+ind
+coord_famd <- ind$coord %>% cbind(madona_moth_imp$deces_m6) %>% cbind(madona_moth_imp$gose_m6_bin) %>% as.data.frame() %>% dplyr::mutate(V6 = as.factor(V6), V7 = as.factor(V7))
+coord_famd %>% ggplot(aes(x = V6, y = Dim.1)) + geom_boxplot(fill = c("#FAB248", "#91501B"), color = "grey") + stat_compare_means() + theme_bw() + coord_flip()
+coord_famd %>% ggplot(aes(x = V6, y = Dim.2)) + geom_boxplot(fill = c("#FAB248", "#91501B"), color = "grey") + stat_compare_means() + theme_bw()
+# Contribution to the first dimension
+fviz_contrib(res.famd, "var", axes = 1, fill = "darkseagreen", color = "white")
+```
+
+# Modelling workflow
+
+## Data splitting
+
+```{r}
+set.seed(241)
+split_a <- initial_split(madona_moth_imp, prop = 0.70, strata = "gose_m6_bin")
+training_a <- split_a %>% training()
+test_a <- split_a %>% testing()
+```
+
+## Resampling - cross-validation
+
+```{r}
+set.seed(249)
+cv_folds_a <- vfold_cv(training_a, v = 3, repeats = 20, strata = "gose_m6_bin")
+```
+
+## Feature selection - Boruta
+
+```{r}
+set.seed(244)
+boruta_a <- Boruta(x = training_a[, -which(colnames(training_a) == "gose_m6_bin")],
+                         y = training_a$gose_m6_bin, doTrace = T, maxRuns = 1000)
+getSelectedAttributes(boruta_a, withTentative = F)
+
+plot(boruta_a, xlab = "", xaxt = "n")
+lz<-lapply(1:ncol(boruta_a$ImpHistory),function(i)
+        boruta_a$ImpHistory[is.finite(boruta_a$ImpHistory[,i]),i])
+names(lz) <- colnames(boruta_a$ImpHistory)
+Labels <- sort(sapply(lz,median))
+axis(side = 1,las=2,labels = names(Labels),
+     at = 1:ncol(boruta_a$ImpHistory), cex.axis = 0.7)
+```
+
+## Recipe
+
+```{r}
+recipe_a <- recipe(gose_m6_bin ~ age + evl_ame + glas + craniec_ini + mydriase_bin + evl_azi + evo_scan_bin + pic_var + pic_moy, 
+                        data = training_a) %>%
+  step_normalize(all_numeric()) %>% 
+  step_dummy(all_factor_predictors())
+```
+
+## Parsnip
+
+```{r}
+logistic_model <- logistic_reg() %>%
+        set_mode("classification") %>%
+        set_engine("glm")
+rf_model <- rand_forest(trees = 1000) %>%
+        set_engine("ranger") %>%
+        set_mode("classification")
+knn_model <- nearest_neighbor(neighbors = 20) %>%
+        set_engine("kknn") %>%
+        set_mode("classification")
+svm_model <- svm_poly() %>%
+        set_engine("kernlab") %>%
+        set_mode("classification")
+```
+
+## Workflow
+
+```{r}
+log_wflow_a <- workflow() %>%
+        add_model(logistic_model) %>%
+        add_recipe(recipe_a)
+rf_wflow_a <- workflow() %>%
+        add_model(rf_model) %>%
+        add_recipe(recipe_a)
+knn_wflow_a <- workflow() %>%
+        add_model(knn_model) %>%
+        add_recipe(recipe_a)
+svm_wflow_a <- workflow() %>%
+        add_model(svm_model) %>%
+        add_recipe(recipe_a)
+```
+
+## Hyperparameter tuning
+
+### Tuning models
+
+```{r}
+tune_rf_train <-
+        rand_forest(
+                mtry = tune(),
+                trees = 1000,
+                min_n = tune(),
+        ) %>% 
+        set_mode("classification") %>% 
+        set_engine("ranger")
+
+tune_knn_train <-
+        nearest_neighbor(
+                neighbors = tune()) %>% 
+        set_mode("classification") %>% 
+        set_engine("kknn")
+
+tune_svm_train <-
+        svm_poly(cost = tune()) %>% 
+        set_mode("classification") %>% 
+        set_engine("kernlab")
+```
+
+### Random Forest
+
+```{r}
+tune_rf_wf_a <-
+        workflow() %>% 
+        add_recipe(recipe_a) %>% 
+        add_model(tune_rf_train)
+
+set.seed(529)
+tune_rf_res_a <-
+        tune_grid(
+                tune_rf_wf_a,
+                resamples = cv_folds_a,
+                grid = 15,
+                metrics = metric_set(roc_auc)
+        )
+tune_rf_res_a %>%
+        collect_metrics() %>%
+        filter(.metric == "roc_auc") %>%
+        select(mean, min_n, mtry) %>%
+        pivot_longer(min_n:mtry,
+                     values_to = "value",
+                     names_to = "parameter"
+        ) %>%
+        ggplot(aes(value, mean, color = parameter)) +
+        geom_point(show.legend = FALSE) +
+        facet_wrap(~parameter, scales = "free_x") +
+        labs(x = NULL, y = "ROC AUC")
+rf_grid_a <- grid_regular(
+        mtry(range = c(1, 3)), 
+        min_n(range = c(15, 25)),
+        levels = 10
+)
+set.seed(529)
+tuned_train_rf_res_a <- tune_grid(
+        tune_rf_wf_a,
+        resamples = cv_folds_a,
+        grid = rf_grid_a, 
+        metrics = metric_set(roc_auc, kap, brier_class), control = control_resamples(save_pred = TRUE)
+)
+tuned_train_rf_res_a %>%
+        collect_metrics() %>%
+        filter(.metric == "roc_auc") %>%
+        mutate(min_n = factor(min_n)) %>%
+        ggplot(aes(mtry, mean, color = min_n)) +
+        geom_line(alpha = 0.5, linewidth = 1.5) +
+        geom_point() +
+        labs(y = "ROC AUC")
+```
+
+### K nearest neighbours
+
+### Support vector machine
+
+### Best algorithm (for each model)
+
+```{r}
+############## RF
+best_rf_roc_a <- select_best(tuned_train_rf_res_a, "roc_auc")
+
+final_rf_a <-
+        finalize_model(
+                tune_rf_train,
+                best_rf_roc_a
+        )
+final_rf_wf_a <- workflow() %>%
+        add_recipe(recipe_a) %>%
+        add_model(final_rf_a)
+```
+
+### Best model selection
+
+```{r}
+auc_rf_train_a <- 
+        collect_metrics(tuned_train_rf_res_a, summarize = F) %>%
+        filter(.metric == "roc_auc") %>%
+        select(.estimate) %>%
+        pull() %>%
+        sort()
+
+auc_df_rf_train_a <- data.frame(auc_rf_train_a) %>%
+        mutate(models = "RF") %>%
+        mutate(auc_res = auc_rf_train_a)
+```
+
+### Bootstrap
+
+```{r}
+set.seed(255)
+testset_boot_a <- bootstraps(test_a, times = 1000, strata = "gose_m6_bin") 
+
+class_metric <- metric_set(roc_auc, brier_class, kap, f_meas, sensitivity, specificity, accuracy)
+
+############### BOOTSTRAP SUPPORT VECTOR MACHINE
+svm_fit_boot_a <-
+        final_svm_wf_a %>% 
+        fit_resamples(testset_boot_a, metrics = class_metric, control = control_grid(save_pred = TRUE))
+
+auc_test_svm_a <- 
+        collect_metrics(svm_fit_boot_a, summarize = F) %>%
+        filter(.metric == class_metric) %>%
+        select(.estimate) %>%
+        pull() %>%
+        sort()
+mean(auc_test_svm_a)
+quantile(auc_test_svm_a, probs = c(0.25, 0.75))
+```
+
+# Model performances
+
+```{r}
+##################### MODEL A
+# ROC curve
+svm_fit_boot_a %>% collect_predictions() %>% roc_curve(gose_m6_bin, .pred_0) %>% ggplot() + geom_line(aes(x = 1-specificity, y = sensitivity), color = "#FC8D62", linewidth = 1.5) + geom_abline(intercept = 0, slope = 1, linetype = "dotted") + theme_bw()
+# Se for Sp 95
+svm_fit_boot_a %>% collect_predictions() %>% roc_curve(gose_m6_bin, .pred_0) %>% dplyr::filter(specificity > 0.949 & specificity < 0.951) %>% dplyr::select(sensitivity)
+# performance metrics
+auc_test_svm_a_df <- data.frame(auc_test_svm_a) %>%
+        mutate(metric_value = "AUROC") %>%
+        mutate(perf_res = auc_test_svm_a)
+
+###### PPV & NPV
+# prevalence of the positive event --> we fixed the prevalence at 50%
+madona_moth_imp %>% dplyr::select(gose_m6_bin) %>% base::table() %>% prop.table()
+# PPV
+svm_fit_boot_a %>% collect_predictions(summarize = F) %>% ppv(truth = gose_m6_bin, estimate = .pred_class, prevalence = 0.45)
+
+dat_ppv_a <- data.frame(
+  category = c("PPV", ""), 
+  ppv_val = c(svm_fit_boot_a %>% collect_predictions() %>% ppv(truth = gose_m6_bin, estimate = .pred_class, prevalence = 0.45) %>% dplyr::select(.estimate) %>% pull(), 1-svm_fit_boot_a %>% collect_predictions() %>% ppv(truth = gose_m6_bin, estimate = .pred_class, prevalence = 0.45) %>% dplyr::select(.estimate) %>% pull())
+)
+dat_ppv_a$ymax <- cumsum(dat_ppv_a$ppv_val)
+dat_ppv_a$ymin <- c(0, head(dat_ppv_a$ymax, n = -1))
+dat_ppv_a %>% ggplot(aes(ymax = ymax, ymin = ymin, xmax = 4, xmin = 3, fill = category)) +
+  geom_rect() +
+  coord_polar(theta = "y") +
+  xlim(c(2, 4)) +
+  scale_fill_manual(values = c("lightgrey", "#FC8D62")) +
+  theme_void()
+
+# NPV
+svm_fit_boot_a %>% collect_predictions(summarize = F) %>% npv(truth = gose_m6_bin, estimate = .pred_class, prevalence = 0.45)
+
+dat_npv_a <- data.frame(
+  category = c("NPV", ""), 
+  npv_val = c(svm_fit_boot_a %>% collect_predictions() %>% npv(truth = gose_m6_bin, estimate = .pred_class, prevalence = 0.45) %>% dplyr::select(.estimate) %>% pull(), 1-svm_fit_boot_a %>% collect_predictions() %>% npv(truth = gose_m6_bin, estimate = .pred_class, prevalence = 0.45) %>% dplyr::select(.estimate) %>% pull())
+)
+dat_npv_a$ymax <- cumsum(dat_npv_a$npv_val)
+dat_npv_a$ymin <- c(0, head(dat_npv_a$ymax, n = -1))
+dat_npv_a %>% ggplot(aes(ymax = ymax, ymin = ymin, xmax = 4, xmin = 3, fill = category)) +
+  geom_rect() +
+  coord_polar(theta = "y") +
+  xlim(c(2, 4)) +
+  scale_fill_manual(values = c("lightgrey", "#FC8D62")) +
+  theme_void()
+```
